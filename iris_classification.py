@@ -5,12 +5,13 @@ import argparse
 import torch.nn.functional as F
 
 # self-defined functions
-from utils import seed, read_data, cal_metrics
-from models import IrisDataset, VGG19, Classifier1, Classifier2
+from utils import seed, cal_metrics
+from models import VGG19, Classifier1, Classifier2
+from data_preprocessing import load_data_openeds2019, OpenEDS2019IRDataset
 
 def iris_classification(args: argparse.Namespace) -> None:
     """
-    Main function for iris classification using CNN features and style features.
+    Main function for training iris classifiers using CNN features and style features (OpenEDS2019 dataset).
 
     Arguments:
         args (argparse.Namespace): parsed argument object. 
@@ -20,21 +21,22 @@ def iris_classification(args: argparse.Namespace) -> None:
     seed(args.seed)
 
     # datasets and dataloader
-    train_x, train_y, _, test_x, test_y, _, num_class = read_data(test_split_ratio = args.test_split_ratio)
-    train_d = IrisDataset(train_x, train_y, 
-                          rotation_prob   = args.rotation_prob, 
-                          rotation_degree = args.rotation_degree,
-                          perspect_prob   = args.perspect_prob,
-                          perspect_degree = args.perspect_degree,
-                          device = args.device
-                          )
-    test_d  = IrisDataset(test_x, test_y, 
-                          rotation_prob   = args.rotation_prob, 
-                          rotation_degree = args.rotation_degree,
-                          perspect_prob   = args.perspect_prob,
-                          perspect_degree = args.perspect_degree,
-                          device = args.device
-                          )
+    train_x, train_y, _, test_x, test_y, _, num_class = load_data_openeds2019(test_split_ratio = args.test_split_ratio)
+    train_d = OpenEDS2019IRDataset(
+        train_x, train_y, 
+        rotation_prob   = args.rotation_prob, 
+        rotation_degree = args.rotation_degree,
+        perspect_prob   = args.perspect_prob,
+        perspect_degree = args.perspect_degree,
+        device = args.device
+        )
+    test_d  = OpenEDS2019IRDataset(test_x, test_y, 
+        rotation_prob   = args.rotation_prob, 
+        rotation_degree = args.rotation_degree,
+        perspect_prob   = args.perspect_prob,
+        perspect_degree = args.perspect_degree,
+        device = args.device
+        )
     train_l = torch.utils.data.DataLoader(train_d, batch_size = args.bs, shuffle = True)
     test_l  = torch.utils.data.DataLoader(test_d , batch_size = args.bs, shuffle = False)
     print('number of classes:', num_class)
@@ -105,6 +107,11 @@ def iris_classification(args: argparse.Namespace) -> None:
         
         wandb.log(wandb_log)
 
+        # save model
+        if args.save_period > 0 and args.rotation_prob == args.perspect_prob == 0 and (e + 1) % args.save_period == 0:
+            torch.save(classifier1.state_dict(), './models/weights/seed_' + str(args.seed) + '_Classifier1_lr_' + str(args.lr) + '_prob_' + str(args.rotation_prob) + '_epoch_' + str(e + 1) + '.pth')
+            torch.save(classifier2.state_dict(), './models/weights/seed_' + str(args.seed) + '_Classifier2_lr_' + str(args.lr) + '_prob_' + str(args.rotation_prob) + '_epoch_' + str(e + 1) + '.pth')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()    
     
@@ -112,6 +119,7 @@ if __name__ == '__main__':
     parser.add_argument('-P', '--project', type = str, default = 'iris-style-transfer', help = 'project name')
     parser.add_argument('-seed', '--seed', type = int, default = 42, help = 'random seed')
     parser.add_argument('-device', '--device', type = int, default = 0, help = 'GPU index. -1 stands for CPU.')
+    parser.add_argument('-SP', '--save_period', type = int, default = 50, help = 'how often the trained model should be saved. -1 stands for no saving.')
     
     # hyperparameters
     parser.add_argument('-E', '--epochs', type = int, default = 500, help = 'number of epochs')
@@ -126,7 +134,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     args.device = 'cuda:' + str(args.device) if args.device >= 0 else 'cpu'
-    args.name = 'seed ' + str(args.seed) + ' rd ' + str(args.rotation_degree) + ' pd ' + str(args.perspect_degree)
+    args.name = 'seed ' + str(args.seed) + ' rd ' + str(args.rotation_degree) + ' pd ' + str(args.perspect_degree) + ' lr ' + str(args.lr)
     wandb.init(project = args.project, name = args.name, config = args.__dict__, anonymous = "allow")
     
     iris_classification(args)

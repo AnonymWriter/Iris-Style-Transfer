@@ -1,13 +1,12 @@
 import os
-import json
 import torch
 import random
 import shutil
+import skimage
 import numpy as np
 from PIL import Image
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import torchvision.transforms.v2 as transforms
 from sklearn.metrics import accuracy_score, precision_score, recall_score, matthews_corrcoef, f1_score, roc_auc_score
 
 # metrics that require average parameter
@@ -41,23 +40,6 @@ def prepare_dir(dir: str) -> None:
     if os.path.isdir(dir):
         shutil.rmtree(dir)
     os.makedirs(dir)
-
-def GramMatrix(x: torch.Tensor) -> torch.Tensor:
-    """
-    Compute normalized gram matrix for feature map.
-
-    Arguments:
-        x (torch.Tensor): feature map.
-
-    Returns:
-        x (torch.Tensor): normalized gram matrix.
-    """
-
-    x = x.flatten(start_dim = -2) # flatten w and h of feature map
-    n = x[0].numel() # number of elements in gram matrix
-    x = x @ x.transpose(-2, -1) 
-    x = x / n # normalize gram matrix
-    return x
 
 def crop_image(image: torch.Tensor, return_idx: bool = False) -> torch.Tensor | tuple[int, int, int, int]:
     """
@@ -178,113 +160,22 @@ def plot_help(images: list[Image.Image | torch.Tensor],
     
     plt.show()
 
-def read_data(test_split_ratio: float = 0.2, 
-              read_seg: bool = False,
-              image_paths: list[str] = ['../data/openeds2019/Semantic_Segmentation_Dataset/train/images/', 
-                                        '../data/openeds2019/Semantic_Segmentation_Dataset/validation/images/',
-                                        '../data/openeds2019/Semantic_Segmentation_Dataset/test/images/'],
-              json_paths:  list[str] = ['../data/openeds2019/OpenEDS_train_userID_mapping_to_images.json', 
-                                        '../data/openeds2019/OpenEDS_validation_userID_mapping_to_images.json',
-                                        '../data/openeds2019/OpenEDS_test_userID_mapping_to_images.json'],
-              seg_paths:   list[str] = ['../data/openeds2019/Semantic_Segmentation_Dataset/train/labels/', 
-                                        '../data/openeds2019/Semantic_Segmentation_Dataset/validation/labels/',
-                                        '../data/openeds2019/Semantic_Segmentation_Dataset/test/labels/'],
-            ) -> tuple[
-                    list[torch.Tensor], # train images tensors 
-                    list[int],          # train image class labels
-                    list[torch.Tensor], # train ground truth segmentation labels
-                    list[torch.Tensor], # test images tensors
-                    list[int],          # test image class labels
-                    list[torch.Tensor], # test ground truth segmentation labels
-                    int                 # number of classes
-                ]:
+def cal_IoUs(preds: torch.Tensor, targets: torch.Tensor, num_class: int = 4, eps: float = 1e-6) -> tuple[list, torch.Tensor]:
     """
-    Read OpenEDS2019 dataset.
-
-    Arguments:
-        test_split_ratio (float): train-test-split ratio.
-        read_seg (bool): whether to read ground truth segmentation labels.
-        image_paths (list[str]): image folder paths.
-        json_paths (list[str]): user-image mapping json file paths.
-        seg_paths (list[str]): grount truth segmentation folder paths.
-
-    Returns:
-        train_x (list[torch.Tensor]): train images tensors. 
-        train_y (list[int]): train image class labels.
-        train_m (list[torch.Tensor]): train ground truth segmentation labels.
-        test_x (list[torch.Tensor]): test images tensors.
-        test_y (list[int]): test image class labels.
-        test_m (list[torch.Tensor]): test ground truth segmentation labels
-        class_count (int): number of classes.
-    """
-    
-    train_x, train_y, train_m, test_x, test_y, test_m = [], [], [], [], [], []
-    class_count = 0
-    
-    # PIL to tensor
-    t = transforms.Compose([transforms.ToImage(), transforms.ToDtype(torch.float32, scale = True)])
-
-    for i_folder, j_path, m_folder in zip(image_paths, json_paths, seg_paths):
-        with open(j_path, 'r') as file:
-            mappings= json.load(file)
-        
-        # create image-class and image-split dictionaries
-        img_class_dict = {}
-        img_train_dict = {}
-        for m in mappings:
-            # id = m['id']
-            imgs = m['semantic_segmenation_images']
-            if len(imgs) <= 2: # skip users with too few samples
-                continue
-            
-            train_imgs, test_imgs = torch.utils.data.random_split(imgs, [1 - test_split_ratio, test_split_ratio])
-            for i in range(len(imgs)):
-                img_class_dict[imgs[i]] = class_count
-                img_train_dict[imgs[i]] = i in train_imgs.indices
-            class_count += 1
-
-        # load images and determine their classes
-        img_paths = os.listdir(i_folder)
-        for i_path in img_paths:
-            if i_path not in img_class_dict: # skipped users
-                continue
-            
-            # read eye image and get class label (each user is a class)
-            p = i_folder + i_path
-            img = Image.open(p).convert('L')
-            img = t(img)
-            img_class = img_class_dict[i_path] 
-            img_train = img_train_dict[i_path] # whether this image is in training set or test set
-
-            # read ground truth segmentation label
-            if read_seg:
-                m_path = i_path[:-4] + '.npy' # file name from .jpg to .npy
-                img_mask = torch.from_numpy(np.load(m_folder + m_path))
-            else:
-                img_mask = None
-            
-            if img_train:
-                train_x.append(img)
-                train_y.append(img_class)
-                train_m.append(img_mask)
-            else:
-                test_x.append(img)
-                test_y.append(img_class)
-                test_m.append(img_mask)
-    
-    return train_x, train_y, train_m, test_x, test_y, test_m, class_count
-
-def cal_mIoU(preds: torch.Tensor, targets: torch.Tensor, num_class: int = 4) -> float:
-    """
-    Calculate mean IoU over classes. Reference: https://www.kaggle.com/code/iezepov/fast-iou-scoring-metric-in-pytorch-and-numpy.
+    Calculate IoU per class and mean IoU. Reference: https://www.kaggle.com/code/iezepov/fast-iou-scoring-metric-in-pytorch-and-numpy.
 
     Arguments:
         preds (torch.Tensor): predicted segmentation labels.
         targets (torch.Tensor): ground truth segmentation labels.
         num_class (int): number of unique classes in segmentation.
+        eps (float): stabilizer.
+
+    Returns:
+        iou_per_class (list[torch.Tensor]): iou per class.
+        miou (torch.Tensor): mean iou.
     """
  
-    # n * h * w
+    # preds and targets are of shape b * h * w
     iou_per_class = []
     
     for cls in range(num_class):
@@ -294,26 +185,171 @@ def cal_mIoU(preds: torch.Tensor, targets: torch.Tensor, num_class: int = 4) -> 
         intersection = (pred_class * true_class).sum(dim=(1, 2))
         union = (pred_class + true_class).clamp(0, 1).sum(dim=(1, 2))
 
-        iou = intersection / (union + 1e-6)
+        iou = intersection / (union + eps)
         iou_per_class.append(iou)
     
-    iou_per_class = torch.stack(iou_per_class, dim = 1)
-    mean_iou = iou_per_class.mean(dim = 1)
+    ious = torch.stack(iou_per_class, dim = 1)
+    miou = ious.mean(dim = 1)
 
-    return mean_iou
+    return iou_per_class, miou
 
-def sample_other(label: int, labels: list[int]) -> int:
+def area_opening(mask: torch.Tensor, area_threshold: int = 500, connectivity: int = 2) -> torch.Tensor:
     """
-    Given a class label, sample a random sample of another class.
+    Remove blobs in the mask.
 
     Arguments:
-        label (int): class label.
-        labels (list[int]): sample label list.
+        mask (torch.Tensor): mask tensor.
+        area_threshold (int): number of pixels in the removed area.
+        connectivity (int): the maximum number of orthogonal steps to reach a neighbor.
+    
+    Returns:
+        mask (torch.Tensor): area-opened mask.
+    """
+
+    device = mask.device
+    mask = skimage.morphology.area_opening(mask.cpu().numpy()[0], area_threshold = area_threshold, connectivity = connectivity)
+    mask = torch.from_numpy(mask).unsqueeze(0).to(device)
+    return mask
+
+import torch
+
+def angular_distance(v1: torch.Tensor, v2: torch.Tensor) -> tuple[torch.Tensor]:
+    """
+    Compute radian and degree distances between two normalized 3D vectors (i.e., gaze vectors).
+    
+    Arguments:
+        v1 (torch.Tensor): tensor of shape (N, 3) - first set of 3D unit vectors, should be already normalized.
+        v2 (torch.Tensor): tensor of shape (N, 3) - second set of 3D unit vectors, should be already normalized.
+    
+    Returns:
+        radian (torch.Tensor): tensor of shape (N,) - radian distance.
+        degree (torch.Tensor): tensor of shape (N,) - degree distance.
+    """
+    # compute dot product
+    dot_product = torch.sum(v1 * v2, dim = 1)  # shape: (N,)
+
+    # clamp to avoid numerical issues with acos
+    dot_product = torch.clamp(dot_product, -1.0, 1.0)
+
+    # compute angle in radians
+    radian = torch.acos(dot_product)  # shape: (N,)
+    
+    # convert to degree
+    degree = torch.rad2deg(radian)
+
+    return radian, degree
+
+def GramMatrix(x: torch.Tensor) -> torch.Tensor:
+    """
+    Compute normalized gram matrix for feature map.
+
+    Arguments:
+        x (torch.Tensor): feature map.
 
     Returns:
-        idx (int): index of sample.
+        x (torch.Tensor): normalized gram matrix.
     """
-    idx = random.randrange(len(labels))
-    while labels[idx] == label:
-        idx = random.randrange(len(labels))
-    return idx
+
+    x = x.flatten(start_dim = -2) # flatten w and h of feature map
+    n = x[0].numel() # number of elements in gram matrix
+    x = x @ x.transpose(-2, -1) 
+    x = x / n # normalize gram matrix
+    return x
+
+class ContentLoss_L2(torch.nn.Module):
+    """
+    Loss function for MSE-based content loss.
+    """
+    
+    def __init__(self, targets: list[torch.Tensor] = None, weights: list[float] = None) -> None:
+        """
+        Arguments:
+            targets (list[torch.Tensor]): target content features.
+            weights (list[float]): weight for each layer.
+        """
+        
+        super().__init__()
+        self.targets = targets
+        self.weights = [1.0] * len(targets) if weights is None else weights
+        # self.weights = [w / sum(self.weights) for w in weights]   # normalize weights
+        
+    def forward(self, preds: list[torch.Tensor]) -> torch.Tensor:
+        """
+        Arguments:
+            preds (list[torch.Tensor]): content features of input image.
+
+        Returns:
+            loss (torch.Tensor): content loss.
+        """
+        
+        loss = 0
+        for p, t, w in zip(preds, self.targets, self.weights):
+            # loss += ((p - t)**2).sum() * w
+            loss += F.mse_loss(p, t) * w
+        loss *= 0.5
+        return loss
+    
+class StyleLoss_Gram(torch.nn.Module):
+    """
+    Loss function for MSE-based style loss.
+    """
+    
+    def __init__(self, targets: list[torch.Tensor] = None, weights: list[float] = None) -> None:
+        """
+        Arguments:
+            targets (list[torch.Tensor]): target style features.
+            weights (list[float]): weight for each layer.
+        """
+         
+        super().__init__()
+        self.targets = [GramMatrix(t) for t in targets]
+        self.weights = [1.0] * len(targets) if weights is None else weights
+        
+    def forward(self, preds: list[torch.Tensor]) -> torch.Tensor:
+        """
+        Arguments:
+            preds (list[torch.Tensor]): style features of input image.
+
+        Returns:
+            loss (torch.Tensor): style loss.
+        """
+
+        loss = 0
+        for p, t, w in zip(preds, self.targets, self.weights):
+            p = GramMatrix(p)
+            loss += ((p - t)**2).sum() * w
+        loss *= 0.25
+        return loss
+
+class StyleLoss_BN(torch.nn.Module):
+    """
+    Loss function for BN statistics-based style loss.
+    """
+    
+    def __init__(self, targets: list[torch.Tensor] = None, weights: list[float] = None) -> None:
+        """
+        Arguments:
+            targets (list[torch.Tensor]): target style features.
+            weights (list[float]): weight for each layer.
+        """
+
+        super().__init__()
+        self.targets_mean = [t.mean(dim = (-2, -1)) for t in targets]
+        self.targets_std = [t.std(dim = (-2, -1)) for t in targets]
+        self.weights = [1.0] * len(targets) if weights is None else weights
+        
+    def forward(self, preds: list[torch.Tensor]) -> torch.Tensor:
+        """
+        Arguments:
+            preds (list[torch.Tensor]): style features of input image.
+
+        Returns:
+            loss (torch.Tensor): style loss.
+        """
+
+        loss = 0
+        for p, t_mean, t_std, w in zip(preds, self.targets_mean, self.targets_std, self.weights):
+            p_mean = p.mean(dim = (-2, -1))
+            p_std = p.std(dim = (-2, -1))
+            loss += ((p_mean - t_mean)**2 + (p_std - t_std)**2).sum() * w / p_mean.shape[-1]
+        return loss

@@ -2,8 +2,8 @@ import tqdm
 import torch
 
 # self-defined functions
-from utils import crop_image
-from models import VGG19, ContentLoss_L2, StyleLoss_BN, StyleLoss_Gram, RITnet
+from models import VGG19, RITnet
+from utils import crop_image, area_opening, ContentLoss_L2, StyleLoss_BN, StyleLoss_Gram
 
 def nst(c_img: torch.Tensor, 
         s_img: torch.Tensor, 
@@ -112,6 +112,8 @@ def nst(c_img: torch.Tensor,
 def mask_and_crop_iris(x: torch.Tensor, 
                        ritnet: torch.nn.Module = None,
                        glint_threshold: float = 0.8,
+                       area_threshold: int = 500, 
+                       connectivity: int = 2,
                        device: str = 'cuda:0',
                        ) -> tuple[torch.Tensor, torch.Tensor, int, int, int, int]:
     """
@@ -121,6 +123,8 @@ def mask_and_crop_iris(x: torch.Tensor,
         x (torch.Tensor): eye image tensor. 
         ritnet (torch.nn.Module): RITnet model.
         glint_threshold (float): threshold for glints.
+        area_threshold (int): number of pixels in the removed area.
+        connectivity (int): the maximum number of orthogonal steps to reach a neighbor.
         device (str): CPU or GPU.
 
     Returns:
@@ -148,6 +152,7 @@ def mask_and_crop_iris(x: torch.Tensor,
     
     # apply mask
     m = m_ritnet * m_glint
+    # m = area_opening(m, area_threshold, connectivity)
     x = x * m
     
     # crop image

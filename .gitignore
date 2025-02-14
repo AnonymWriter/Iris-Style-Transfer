@@ -1,0 +1,7 @@
+saved/
+wandb/
+__pycache__/
+.ipynb_checkpoints/
+.virtual_documents/
+models/weights/*.pt
+models/weights/*.pth
